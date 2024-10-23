@@ -1,0 +1,61 @@
+# Updates GitHub every friday
+
+variables:
+- group: AzureSecrets
+
+trigger: none
+
+schedules:
+- cron: "0 12 * * 5"  # Run at 12:00 PM UTC every Friday
+  displayName: "Weekly Push to GitHub"
+  branches:
+    include:
+      - main
+
+stages:
+- stage: PushToGitHub
+  jobs:
+  - job: PushJob
+    steps:
+    - checkout: self 
+
+    - script: | 
+        git config --global user.email "andujarbrutus@gmail.com"
+        git config --global user.name "brutusa"
+      displayName: 'Configure git'
+    
+    # Checkout the main Azure branch
+    - script: |
+        git checkout -b main || git checkout main
+      displayName: 'Checkout Main Branch'  
+
+    # Added my GitHub remote repository
+    - script: |
+        git remote add github https://$(GITHUB_TOKEN)@github.com/TerrorismAnalyticsBureau/TAB-devops.git
+      displayName: 'Add GitHub Remote'  
+
+
+    # Pull latest changes from GitHub
+    - script: |
+        git pull github main --rebase || echo "No changes to pull"
+        # Check if there are conflicts
+        if [ $? -ne 0 ]; then
+          echo "Conflict detected. Attempting to skip the commit."
+          
+          git rebase --skip || echo "Could not skip the conflicting commit."
+        fi
+      displayName: 'Pull from GitHub'
+
+    - script: |
+        if [ -n "$(git status --porcelain)" ]; then
+          git add -A
+          git rm $(git ls-files --deleted) || echo "No files to remove"
+          git commit -m "Sync changes from Azure Repo to GitHub"
+        else
+          echo "No changes to commit"
+        fi
+        
+        git push github main
+      displayName: 'Push to GitHub'
+      env:
+          GITHUB_TOKEN: $(GITHUB_TOKEN)
