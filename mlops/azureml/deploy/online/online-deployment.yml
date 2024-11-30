@@ -1,6 +1,5 @@
 $schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
 name: blue
-endpoint_name: taxi-fare-online
-model: azureml:taxi-model@latest
+endpoint_name: tab-online
 instance_type: Standard_DS2_v2
 instance_count: 1

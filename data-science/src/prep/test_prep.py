@@ -1,102 +1,230 @@
+import argparse
+
+from pathlib import Path
 import os
-import subprocess
+import numpy as np
 import pandas as pd
 
-def test_prep_data():
-    
-    raw_data = "/tmp/raw"
-    train_data = "/tmp/train"
-    val_data = "/tmp/val"
-    test_data = "/tmp/test"
+import mlflow
 
-    os.makedirs(raw_data, exist_ok = True)
-    os.makedirs(train_data, exist_ok = True)
-    os.makedirs(val_data, exist_ok = True)
-    os.makedirs(test_data, exist_ok = True)
+import torch
+import numpy as np
+import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as func
+import torch.optim as optim
+import os
+from datetime import datetime, timedelta
+import calendar
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from torch.utils.data import DataLoader, TensorDataset
+import json
+
+TARGET_COL = "attacktype1"
+
+NUMERIC_COLS = [
+    "iyear",
+    "imonth",
+    "iday",
+    "country",
+    "region_code",
+]
+
+CAT_NOM_COLS = [
+    "provstate",
+    "city",
+]
+
+CAT_ORD_COLS = [
+]
+
+# ------------------------------ Data Preprocessing ------------------------------
+
+# Set pyTorch local env to use segmented GPU memory
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Clear GPU cache & Set the device to use GPU
+torch.cuda.empty_cache()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Load dataset
+# Skip rows = 1 because those are the column names
+X = np.array([])
+
+# Read the file using its encoding
+data = pd.read_csv('./globalterrorismdb_0718dist.csv', encoding="Windows-1252")
+
+# Extract relevant columns (adjust indices or column names as needed)
+input_columns = data.iloc[:, [1, 2, 3, 7, 11]]
+input_columns = input_columns.fillna(0)
+
+# Convert non-numeric to numeric and fill missing values
+for col in input_columns.columns:
+    input_columns[col] = pd.to_numeric(input_columns[col], errors='coerce')  # Convert non-numeric to NaN
+input_columns = input_columns.fillna(0)  # Replace NaN with 0
+
+attack_target = data.iloc[:, [28]]
+group_target = data.iloc[:, [58]]
+
+# Set the base date (last day of 2017)
+last_date = datetime(2017, 12, 31)
+
+# Convert last date to numeric form
+last_date_numeric = last_date.toordinal()
+
+# Get date from dataset
+data['date_str'] = data['iyear'].astype(str) + '-' + data['imonth'].astype(str).str.zfill(2) + '-' + data['iday'].astype(str).str.zfill(2)
+data['date'] = pd.to_datetime(data['date_str'], errors='coerce')
 
 
-    data = {
-        'cost': [4.5, 6.0, 9.5, 4.0, 6.0, 11.5, 25.0, 3.5, 5.0, 11.0, 7.5, 24.5, 9.5,
-                7.5, 6.0, 5.0, 9.0, 25.5, 17.5, 52.0],
-        'distance': [0.83, 1.27, 1.8, 0.5, 0.9, 2.72, 6.83, 0.45, 0.77, 2.2, 1.5, 6.27,
-                    2.0, 1.54, 1.24, 0.75, 2.2, 7.0, 5.1, 18.51],
-        'dropoff_hour': [21, 21, 9, 17, 10, 13, 17, 10, 2, 1, 16, 18, 20, 20, 1, 17,
-                        21, 16, 4, 10],
-        'dropoff_latitude': [40.69454574584961, 40.81214904785156, 40.67874145507813,
-                            40.75471496582031, 40.66966247558594, 40.77496337890625,
-                            40.75603103637695, 40.67219161987305, 40.66605758666992,
-                            40.69973754882813, 40.61215972900391, 40.74581146240234,
-                            40.78779602050781, 40.76130676269531, 40.72980117797852,
-                            40.71107864379883, 40.747501373291016, 40.752384185791016,
-                            40.66606140136719, 40.64547729492188],
-        'dropoff_longitude': [-73.97611236572266, -73.95975494384766,
-                            -73.98030853271484, -73.92549896240234,
-                            -73.91104125976562, -73.89237213134766,
-                            -73.94535064697266, -74.01203918457031,
-                            -73.97817993164062, -73.99366760253906,
-                            -73.94902801513672, -73.98792266845703,
-                            -73.95561218261719, -73.8807601928711, -73.9117202758789,
-                            -73.96553039550781, -73.9442138671875,
-                            -73.97544860839844, -73.87281036376953,
-                            -73.77632141113281],
-        'dropoff_minute': [5, 54, 57, 52, 34, 20, 5, 8, 37, 27, 21, 5, 26, 46, 25, 1,
-                        5, 20, 41, 46],
-        'dropoff_month': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        'dropoff_monthday': [3, 19, 5, 8, 29, 30, 8, 4, 9, 14, 12, 9, 14, 17, 10, 9, 8,
-                            2, 15, 21],
-        'dropoff_second': [52, 37, 28, 20, 59, 20, 38, 52, 43, 24, 59, 29, 58, 11, 3,
-                        4, 34, 21, 6, 36],
-        'dropoff_weekday': [6, 1, 1, 4, 4, 5, 4, 0, 5, 3, 1, 5, 3, 6, 6, 5, 4, 5, 4,
-                            3],
-        'passengers': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1],
-        'pickup_hour': [21, 21, 9, 17, 10, 13, 16, 10, 2, 1, 16, 17, 20, 20, 1, 16, 20,
-                        15, 4, 10],
-        'pickup_latitude': [40.6938362121582, 40.80146789550781, 40.6797981262207,
-                            40.76081848144531, 40.66493988037109, 40.74625396728516,
-                            40.80010223388672, 40.67601776123047, 40.67120361328125,
-                            40.68327331542969, 40.6324462890625, 40.71521377563477,
-                            40.80733871459961, 40.750484466552734, 40.7398796081543,
-                            40.71691131591797, 40.773414611816406, 40.79001235961914,
-                            40.660118103027344, 40.78546905517578],
-        'pickup_longitude': [-73.98726654052734, -73.94845581054688, -73.9554443359375,
-                            -73.92293548583984, -73.92304229736328, -73.8973159790039,
-                            -73.9500503540039, -74.0144271850586, -73.98458099365234,
-                            -73.96582794189453, -73.94767761230469,
-                            -73.96052551269531, -73.96453094482422,
-                            -73.88248443603516, -73.92410278320312,
-                            -73.95661163330078, -73.92512512207031,
-                            -73.94800567626953, -73.95987701416016,
-                            -73.94915771484375],
-        'pickup_minute': [2, 49, 46, 49, 28, 8, 32, 6, 34, 14, 14, 35, 17, 38, 20, 56,
-                        56, 49, 23, 18],
-        'pickup_month': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        'pickup_monthday': [3, 19, 5, 8, 29, 30, 8, 4, 9, 14, 12, 9, 14, 17, 10, 9, 8,
-                            2, 15, 21],
-        'pickup_second': [35, 17, 18, 12, 21, 46, 18, 22, 5, 45, 12, 52, 20, 8, 28, 54,
-                        41, 53, 43, 2],
-        'pickup_weekday': [6, 1, 1, 4, 4, 5, 4, 0, 5, 3, 1, 5, 3, 6, 6, 5, 4, 5, 4, 3],
-        'store_forward': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        'vendor': [2, 2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 2, 1, 2, 2, 2, 1, 1, 2, 2]
-    }
+# Convert dates to numeric by subtracting the last date of 2017
+# Get number of days since Dec 31, 2017
+data['date_numeric'] = (data['date'] - last_date).dt.days
 
-    df = pd.DataFrame(data)
-    df.to_csv(os.path.join(raw_data, "taxi-data.csv"))
-    p = os.path.join(raw_data, "taxi-data.csv")
-    
-    cmd = f"python data-science/src/prep/prep.py --raw_data={p} --train_data={train_data} --val_data={val_data} --test_data={test_data}"
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
-    out, err = p.communicate() 
-    result = str(out).split('\\n')
-    for lin in result:
-        if not lin.startswith('#'):
-            print(lin)
+# Extract unique values
+unique_attacks = list(set(data['attacktype1_txt']))
+unique_groups = list(set(data['gname']))
+unique_provstates = list(set(data['provstate']))
+unique_cities = list(set(data['city']))
 
-    assert os.path.exists(os.path.join(train_data, "train.parquet"))
-    assert os.path.exists(os.path.join(val_data, "val.parquet"))
-    assert os.path.exists(os.path.join(test_data, "test.parquet"))
+# Initialize LabelEncoder and fit to the unique groups
+attack_encoder = LabelEncoder()
+attack_encoder.fit(unique_attacks)
 
-    print("¨Prep Data Unit Test Completed")
+group_encoder = LabelEncoder()
+group_encoder.fit(unique_groups)
+
+provstate_encoder = LabelEncoder()
+provstate_encoder.fit(unique_provstates)
+
+city_encoder = LabelEncoder()
+city_encoder.fit(unique_cities)
+
+# Set the output size based on the number of unique attack types
+num_attack_types = len(unique_attacks)
+num_groups = len(unique_groups)
+num_cities = len(unique_cities)
+num_provstates = len(unique_provstates)
+
+# Create a dictionary to map names to their encoded IDs
+group_dict = pd.Series(group_encoder.transform(unique_groups), index=unique_groups)
+provstate_dict = pd.Series(provstate_encoder.transform(unique_provstates), index=unique_provstates)
+city_dict = pd.Series(city_encoder.transform(unique_cities), index=unique_cities)
+
+# Assign values to tensors
+input_tensor = torch.tensor(input_columns.to_numpy(), dtype=torch.float32)
+attack_target_tensor = torch.tensor(attack_target.values, dtype=torch.float32)
+group_target_tensor = torch.tensor(group_encoder.fit_transform(group_target.values), dtype=torch.float32)
+city_target_tensor = torch.tensor(city_encoder.fit_transform(data['city'].values), dtype=torch.float32)
+provstate_target_tensor = torch.tensor(provstate_encoder.fit_transform(data['provstate'].values), dtype=torch.float32)
+
+# TESTING - PRINT DICTIONARY ITEMS
+#for key, value in group_dict.items():
+#  print("group: ", key, "| ID #:", value)
+
+#for key, value in provstate_dict.items():
+#  print("provstate: ", key, "| ID #:", value)
+
+#for key, value in city_dict.items():
+#  print("city: ", key, "| ID #:", value)
+
+# Assign values to tensors for processing
+X_tensor = input_tensor
+
+# Normalize: mean and std for each feature
+mean = X_tensor.mean(dim=0, keepdim=True)
+std = X_tensor.std(dim=0, keepdim=True)
+X_tensor = (X_tensor - mean) / std
+
+Y_tensor_attack = attack_target_tensor
+Y_tensor_group = group_target_tensor
+Y_tensor_city = city_target_tensor
+Y_tensor_provstate = provstate_target_tensor
+Y_tensor_date = torch.tensor(data['date_numeric'] - last_date_numeric, dtype=torch.float32)
+
+# Set tensors to use GPU
+X_tensor = X_tensor.to(device)
+Y_tensor_attack = Y_tensor_attack.to(device)
+Y_tensor_group = Y_tensor_group.to(device)
+Y_tensor_city = Y_tensor_city.to(device)
+Y_tensor_provstate = Y_tensor_provstate.to(device)
+Y_tensor_date = Y_tensor_date.to(device)
+
+# Define Arguments for this step
+
+class MyArgs:
+    def __init__(self, /, **kwargs):
+        self.__dict__.update(kwargs)
+
+args = MyArgs(
+            raw_data = "../../data/", 
+            train_data = "/tmp/prep/train",
+            val_data = "/tmp/prep/val",
+            test_data = "/tmp/prep/test",
+            )
+
+os.makedirs(args.train_data, exist_ok = True)
+os.makedirs(args.val_data, exist_ok = True)
+os.makedirs(args.test_data, exist_ok = True)
+
+
+
+def main(args):
+    '''Read, split, and save datasets'''
+
+    # ------------ Reading Data ------------ #
+    # -------------------------------------- #
+
+    print("mounted_path files: ")
+    arr = os.listdir(args.raw_data)
+    print(arr)
+
+    data = pd.read_csv((Path(args.raw_data) / 'globalterrorismdb_0718dist.csv'))
+    data = data[NUMERIC_COLS + CAT_NOM_COLS + CAT_ORD_COLS + [TARGET_COL]]
+
+    # ------------- Split Data ------------- #
+    # -------------------------------------- #
+
+    # Split data into train, val and test datasets
+
+    random_data = np.random.rand(len(data))
+
+    msk_train = random_data < 0.7
+    msk_val = (random_data >= 0.7) & (random_data < 0.85)
+    msk_test = random_data >= 0.85
+
+    train = data[msk_train]
+    val = data[msk_val]
+    test = data[msk_test]
+
+    mlflow.log_metric('train size', train.shape[0])
+    mlflow.log_metric('val size', val.shape[0])
+    mlflow.log_metric('test size', test.shape[0])
+
+    train.to_parquet((Path(args.train_data) / "train.parquet"))
+    val.to_parquet((Path(args.val_data) / "val.parquet"))
+    test.to_parquet((Path(args.test_data) / "test.parquet"))
 
 if __name__ == "__main__":
 
-    test_prep_data()
+    mlflow.start_run()
+    
+    # ---------- Parse Arguments ----------- #
+    # -------------------------------------- #
+
+    args = parse_args()
+
+    lines = [
+        f"Raw data path: {args.raw_data}",
+        f"Train dataset output path: {args.train_data}",
+        f"Val dataset output path: {args.val_data}",
+        f"Test dataset path: {args.test_data}",
+
+    ]
+
+    for line in lines:
+        print(line)
+
+    main(args)
+
+    mlflow.end_run()

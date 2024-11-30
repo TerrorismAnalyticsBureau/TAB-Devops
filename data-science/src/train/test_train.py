@@ -1,93 +1,334 @@
-import os
-import subprocess
+import argparse
+
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 
-def test_train_model():
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+
+import mlflow
+import mlflow.sklearn
+
+import torch
+import numpy as np
+import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as func
+import torch.optim as optim
+import os
+from datetime import datetime, timedelta
+import calendar
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from torch.utils.data import DataLoader, TensorDataset
+import json
+
+TARGET_COL = "attacktype1"
+
+NUMERIC_COLS = [
+    "iyear",
+    "imonth",
+    "iday",
+    "country",
+    "region_code",
+]
+
+CAT_NOM_COLS = [
+    "provstate",
+    "city",
+]
+
+CAT_ORD_COLS = [
+]
+
+# Define Arguments for this step
+
+class MyArgs:
+    def __init__(self, /, **kwargs):
+        self.__dict__.update(kwargs)
+
+args = MyArgs(
+                train_data = "/tmp/prep/train",
+                model_output = "/tmp/train",
+                regressor__n_estimators = 500,
+                regressor__bootstrap = 1,
+                regressor__max_depth = 10,
+                regressor__max_features = "auto", 
+                regressor__min_samples_leaf = 4,
+                regressor__min_samples_split = 5
+                )
+
+os.makedirs(args.model_output, exist_ok = True)
+
+# Set pyTorch local env to use segmented GPU memory
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
+# Clear GPU cache & Set the device to use GPU
+torch.cuda.empty_cache()
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ------------------------------ LSTM Prediction Model ------------------------------
+
+def train_model(X_tensor, Y_tensor, num_classes, sequence_length=30, hidden_size=128, num_epochs=10, batch_size=32):
+    class LSTMPredictor(nn.Module):
+        def __init__(self, input_size, hidden_size, output_size):
+            super(LSTMPredictor, self).__init__()
+            self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+            self.dropout = nn.Dropout(0.2)
+            self.fc = nn.Linear(hidden_size, output_size)
+
+        def forward(self, x):
+            lstm_out, _ = self.lstm(x)
+            lstm_out = self.dropout(lstm_out)
+            logits = self.fc(lstm_out[:, -1, :])
+            return logits
+
+    # Create sequences
+    def create_sequences(input_data, seq_length):
+        sequences = []
+        for i in range(len(input_data) - seq_length + 1):
+            seq = input_data[i:i + seq_length]
+            sequences.append(seq)
+        return torch.stack(sequences)
+
+    sequences = create_sequences(X_tensor, sequence_length)
+
+    # Create DataLoader
+    dataset = TensorDataset(sequences, Y_tensor[:len(sequences)])
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Initialize model, loss, and optimizer
+    model = LSTMPredictor(input_size=X_tensor.shape[1], hidden_size=hidden_size, output_size=num_classes).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        for batch_x, batch_y in dataloader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
+
+            # Forward pass
+            outputs = model(batch_x)
+            if batch_y.ndim > 1:
+                batch_y = batch_y.argmax(dim=1)
+            batch_y = batch_y.long()
+
+            loss = criterion(outputs, batch_y)
+
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
+
+    return model
+
+# ------------------------------ Date Prediction Model ------------------------------
+
+class LSTMDate(nn.Module):
+    def __init__(self, input_size, hidden_layer_size, output_size):
+        super(LSTMDate, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_layer_size, batch_first=True)
+        self.linear = nn.Linear(hidden_layer_size, output_size)
+
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        predictions = self.linear(lstm_out[:, -1])
+        return predictions
+
+# Convert date to numeric since the final day in dataset
+def convert_date_to_numeric(date):
+    return (date - datetime(2017, 12, 31)).days
+
+# Generate date range (years, months, days)
+def generate_date_range(start_year, end_year):
+    date_list = []
+    for year in range(start_year, end_year + 1):
+      # Loop through months 1 to 12
+        for month in range(1, 13):
+            num_days = calendar.monthrange(year, month)[1]
+            # Loop through the days of the month
+            for day in range(1, num_days + 1):
+                date = datetime(year, month, day)
+                date_list.append(date)
+    return date_list
+
+# Create sequences from the numeric dates and features
+def create_sequences(data, seq_length):
+    sequences = []
+    targets = []
+    for i in range(len(data) - seq_length):
+        seq = data[i:i+seq_length]
+        target = data[i+seq_length]
+        sequences.append(seq)
+        targets.append(target)
+    return np.array(sequences), np.array(targets)
+
+# Main function to train the model
+def train_date(X_tensor, Y_tensor, sequence_length=30, hidden_size=128, num_epochs=1000, batch_size=32):
+    X_tensor = X_tensor.to(device)
+    Y_tensor = Y_tensor.to(device)
+
+    # Reshape X_tensor to have shape [num_samples, sequence_length, num_features]
+    X_tensor = X_tensor.reshape(X_tensor.shape[0], X_tensor.shape[1], 1)
+
+    # Create a DataLoader for batching
+    dataset = TensorDataset(X_tensor, Y_tensor)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Create the model
+    input_size = X_tensor.shape[2]  # Number of features (year, month, day)
+    output_size = 1  # Predicting a single value (days since reference date)
+    model = LSTMDate(input_size, hidden_size, output_size)
+
+    # Move model to device
+    model.to(device)
+
+    # Define loss and optimizer
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()  # Set model to training mode
+        for i, (inputs, labels) in enumerate(train_loader):
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+
+            # Zero the gradients, backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        if (i + 1) % 100 == 0:  # Print every 100 batches
+            print(f"Epoch [{epoch+1}/{num_epochs}], Batch [{i+1}], Loss: {loss.item():.4f}")
+
+    return model
+
+# Generate date list for the years 2018 to 2023
+date_list = generate_date_range(2018, 2023)
+
+# Convert the list of dates to numeric values (days since 2017-12-31)
+date_numeric = [convert_date_to_numeric(date) for date in date_list]
+
+# Create sequences for training
+# Use the last 30 days to predict the next one
+sequence_length = 30
+X, Y = create_sequences(date_numeric, sequence_length)
+
+# Convert to PyTorch tensors
+X_tensor_date = torch.tensor(X, dtype=torch.float32)
+Y_tensor_date = torch.tensor(Y, dtype=torch.float32)
+
+# ------------------------------ Train & Evaluate Models ------------------------------
+model_attack = train_model(X_tensor, Y_tensor_attack, num_classes=num_attack_types)
+model_attack = model_attack.to(device)
+
+model_groups = train_model(X_tensor, Y_tensor_group, num_classes=num_groups)
+model_groups = model_groups.to(device)
+
+model_city = train_model(X_tensor, Y_tensor_city, num_classes=num_cities)
+model_city = model_city.to(device)
+
+model_provstate = train_model(X_tensor, Y_tensor_provstate, num_classes=num_provstates)
+model_provstate = model_provstate.to(device)
+
+model_date = train_date(X_tensor_date, Y_tensor_date, sequence_length=sequence_length)
+model_date = model_date.to(device)
+
+# Set the models to evaluation mode
+model_attack.eval()
+model_groups.eval()
+model_city.eval()
+model_provstate.eval()
+model_date.eval()
+
+
+
+def main(args):
+    '''Read train dataset, train model, save trained model'''
+
+    # Read train data
+    train_data = pd.read_parquet(Path(args.train_data))
+
+    # Split the data into input(X) and output(y)
+    y_train = train_data[TARGET_COL]
+    X_train = train_data[NUMERIC_COLS + CAT_NOM_COLS + CAT_ORD_COLS]
+
+    # Train a Random Forest Regression Model with the training set
+    model = RandomForestRegressor(n_estimators = args.regressor__n_estimators,
+                                  bootstrap = args.regressor__bootstrap,
+                                  max_depth = args.regressor__max_depth,
+                                  max_features = args.regressor__max_features,
+                                  min_samples_leaf = args.regressor__min_samples_leaf,
+                                  min_samples_split = args.regressor__min_samples_split,
+                                  random_state=0)
+
+    # log model hyperparameters
+    mlflow.log_param("model", "RandomForestRegressor")
+    mlflow.log_param("n_estimators", args.regressor__n_estimators)
+    mlflow.log_param("bootstrap", args.regressor__bootstrap)
+    mlflow.log_param("max_depth", args.regressor__max_depth)
+    mlflow.log_param("max_features", args.regressor__max_features)
+    mlflow.log_param("min_samples_leaf", args.regressor__min_samples_leaf)
+    mlflow.log_param("min_samples_split", args.regressor__min_samples_split)
+
+    # Train model with the train set
+    model.fit(X_train, y_train)
+
+    # Predict using the Regression Model
+    yhat_train = model.predict(X_train)
+
+    # Evaluate Regression performance with the train set
+    r2 = r2_score(y_train, yhat_train)
+    mse = mean_squared_error(y_train, yhat_train)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_train, yhat_train)
     
-    train_data = "/tmp/train"
-    model_output = "/tmp/model"
+    # log model performance metrics
+    mlflow.log_metric("train r2", r2)
+    mlflow.log_metric("train mse", mse)
+    mlflow.log_metric("train rmse", rmse)
+    mlflow.log_metric("train mae", mae)
 
-    os.makedirs(train_data, exist_ok = True)
-    os.makedirs(model_output, exist_ok = True)
+    # Visualize results
+    plt.scatter(y_train, yhat_train,  color='black')
+    plt.plot(y_train, y_train, color='blue', linewidth=3)
+    plt.xlabel("Real value")
+    plt.ylabel("Predicted value")
+    plt.savefig("regression_results.png")
+    mlflow.log_artifact("regression_results.png")
 
-    data = {
-        'cost': [4.5, 6.0, 9.5, 4.0, 6.0, 11.5, 25.0, 3.5, 5.0, 11.0, 7.5, 24.5, 9.5,
-                7.5, 6.0, 5.0, 9.0, 25.5, 17.5, 52.0],
-        'distance': [0.83, 1.27, 1.8, 0.5, 0.9, 2.72, 6.83, 0.45, 0.77, 2.2, 1.5, 6.27,
-                    2.0, 1.54, 1.24, 0.75, 2.2, 7.0, 5.1, 18.51],
-        'dropoff_hour': [21, 21, 9, 17, 10, 13, 17, 10, 2, 1, 16, 18, 20, 20, 1, 17,
-                        21, 16, 4, 10],
-        'dropoff_latitude': [40.69454574584961, 40.81214904785156, 40.67874145507813,
-                            40.75471496582031, 40.66966247558594, 40.77496337890625,
-                            40.75603103637695, 40.67219161987305, 40.66605758666992,
-                            40.69973754882813, 40.61215972900391, 40.74581146240234,
-                            40.78779602050781, 40.76130676269531, 40.72980117797852,
-                            40.71107864379883, 40.747501373291016, 40.752384185791016,
-                            40.66606140136719, 40.64547729492188],
-        'dropoff_longitude': [-73.97611236572266, -73.95975494384766,
-                            -73.98030853271484, -73.92549896240234,
-                            -73.91104125976562, -73.89237213134766,
-                            -73.94535064697266, -74.01203918457031,
-                            -73.97817993164062, -73.99366760253906,
-                            -73.94902801513672, -73.98792266845703,
-                            -73.95561218261719, -73.8807601928711, -73.9117202758789,
-                            -73.96553039550781, -73.9442138671875,
-                            -73.97544860839844, -73.87281036376953,
-                            -73.77632141113281],
-        'dropoff_minute': [5, 54, 57, 52, 34, 20, 5, 8, 37, 27, 21, 5, 26, 46, 25, 1,
-                        5, 20, 41, 46],
-        'dropoff_month': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        'dropoff_monthday': [3, 19, 5, 8, 29, 30, 8, 4, 9, 14, 12, 9, 14, 17, 10, 9, 8,
-                            2, 15, 21],
-        'dropoff_second': [52, 37, 28, 20, 59, 20, 38, 52, 43, 24, 59, 29, 58, 11, 3,
-                        4, 34, 21, 6, 36],
-        'dropoff_weekday': [6, 1, 1, 4, 4, 5, 4, 0, 5, 3, 1, 5, 3, 6, 6, 5, 4, 5, 4,
-                            3],
-        'passengers': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1],
-        'pickup_hour': [21, 21, 9, 17, 10, 13, 16, 10, 2, 1, 16, 17, 20, 20, 1, 16, 20,
-                        15, 4, 10],
-        'pickup_latitude': [40.6938362121582, 40.80146789550781, 40.6797981262207,
-                            40.76081848144531, 40.66493988037109, 40.74625396728516,
-                            40.80010223388672, 40.67601776123047, 40.67120361328125,
-                            40.68327331542969, 40.6324462890625, 40.71521377563477,
-                            40.80733871459961, 40.750484466552734, 40.7398796081543,
-                            40.71691131591797, 40.773414611816406, 40.79001235961914,
-                            40.660118103027344, 40.78546905517578],
-        'pickup_longitude': [-73.98726654052734, -73.94845581054688, -73.9554443359375,
-                            -73.92293548583984, -73.92304229736328, -73.8973159790039,
-                            -73.9500503540039, -74.0144271850586, -73.98458099365234,
-                            -73.96582794189453, -73.94767761230469,
-                            -73.96052551269531, -73.96453094482422,
-                            -73.88248443603516, -73.92410278320312,
-                            -73.95661163330078, -73.92512512207031,
-                            -73.94800567626953, -73.95987701416016,
-                            -73.94915771484375],
-        'pickup_minute': [2, 49, 46, 49, 28, 8, 32, 6, 34, 14, 14, 35, 17, 38, 20, 56,
-                        56, 49, 23, 18],
-        'pickup_month': [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        'pickup_monthday': [3, 19, 5, 8, 29, 30, 8, 4, 9, 14, 12, 9, 14, 17, 10, 9, 8,
-                            2, 15, 21],
-        'pickup_second': [35, 17, 18, 12, 21, 46, 18, 22, 5, 45, 12, 52, 20, 8, 28, 54,
-                        41, 53, 43, 2],
-        'pickup_weekday': [6, 1, 1, 4, 4, 5, 4, 0, 5, 3, 1, 5, 3, 6, 6, 5, 4, 5, 4, 3],
-        'store_forward': [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        'vendor': [2, 2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 2, 1, 2, 2, 2, 1, 1, 2, 2]
-    }
-
-    df = pd.DataFrame(data)
-    df.to_parquet(os.path.join(train_data, "train.parquet"))
-
-    cmd = f"python data-science/src/train/train.py --train_data={train_data} --model_output={model_output}"
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True)
-    out, err = p.communicate() 
-    result = str(out).split('\\n')
-    for lin in result:
-        if not lin.startswith('#'):
-            print(lin)
-    
-    assert os.path.exists(os.path.join(model_output, "model.pkl"))
-    
-    print("Train Model Unit Test Completed")
+    # Save the model
+    mlflow.sklearn.save_model(sk_model=model, path=args.model_output)
 
 if __name__ == "__main__":
-    test_train_model()
+    mlflow.start_run()
+    
+    # ---------- Parse Arguments ----------- #
+    # -------------------------------------- #
+
+    args = parse_args()
+    
+
+    lines = [
+        f"Train dataset input path: {args.train_data}",
+        f"Model output path: {args.model_output}",
+        f"n_estimators: {args.regressor__n_estimators}",
+        f"bootstrap: {args.regressor__bootstrap}",
+        f"max_depth: {args.regressor__max_depth}",
+        f"max_features: {args.regressor__max_features}",
+        f"min_samples_leaf: {args.regressor__min_samples_leaf}",
+        f"min_samples_split: {args.regressor__min_samples_split}"
+    ]
+
+    for line in lines:
+        print(line)
+
+    main(args)
+
+    mlflow.end_run()

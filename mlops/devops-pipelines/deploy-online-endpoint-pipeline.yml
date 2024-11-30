@@ -4,7 +4,7 @@
 variables:
 - template: ../../config-infra-prod.yml
 - name: endpoint_name
-  value: taxi-online-$(namespace)$(postfix)$(environment)
+  value: aiout-$(namespace)$(postfix)$(environment)
 - name: endpoint_type
   value: online
 
@@ -75,7 +75,7 @@ stages:
         #       https://learn.microsoft.com/en-us/azure/machine-learning/how-to-deploy-and-where?tabs=python#create-a-deployment
       - template: /aml-cli-v2/create-deployment.yml
         parameters:
-          deployment_name: taxi-online-dp
+          deployment_name: tab-online-dp
           deployment_file: mlops/azureml/deploy/online/online-deployment.yml
 
         # Allocate traffic to the online deployment
@@ -90,13 +90,11 @@ stages:
         #       https://learn.microsoft.com/en-us/azure/machine-learning/how-to-safely-rollout-online-endpoints?tabs=azure-cli
       - template: /aml-cli-v2/allocate-traffic.yml
         parameters:
-          traffic_allocation: taxi-online-dp=100
+          traffic_allocation: tab-online-dp=100
 
         # Test the online deployment
-        # Note: he step uses Azure ML CLI to test the online deployment.
+        # Note: this step uses Azure ML CLI to test the online deployment.
         #
       - template: /aml-cli-v2/test-deployment.yml
         parameters:
-          deployment_name: taxi-online-dp
-          sample_request: data/taxi-request.json
-          request_type: json
+          deployment_name: tab-online-dp

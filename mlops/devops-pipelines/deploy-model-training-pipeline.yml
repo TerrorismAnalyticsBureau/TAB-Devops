@@ -69,7 +69,7 @@ stages:
       - template: /aml-cli-v2/register-environment.yml
         parameters:
           build_type: conda
-          environment_name: taxi-train-env
+          environment_name: tab-train-env
           environment_file: mlops/azureml/train/train-env.yml
 
         # Create the compute target.
@@ -95,7 +95,7 @@ stages:
       - template: /aml-cli-v2/register-data.yml
         parameters:
           data_type: uri_file
-          data_name: taxi-data
+          data_name: globalterrorismdb_0718dist
           data_file: mlops/azureml/train/data.yml
 
           
@@ -111,5 +111,5 @@ stages:
       - template: /aml-cli-v2/run-pipeline.yml
         parameters:
           pipeline_file: mlops/azureml/train/pipeline.yml
-          experiment_name: $(environment)_taxi_fare_train_$(Build.SourceBranchName)
-          display_name: $(environment)_taxi_fare_run_$(Build.BuildID)
+          experiment_name: $(environment)_tab_train_$(Build.SourceBranchName)
+          display_name: $(environment)_tab_run_$(Build.BuildID)
